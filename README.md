@@ -22,6 +22,7 @@
 * Allow selection of alarm tone (maybe... I've got an idea but no clue if it would work)
 * Make a less manual installation method
 * Make a settings app and .desktop file for settings changes instead of editing text files
+* There has got to be a better way to force Clocks to reload its settings than a kill & respawn, right?
 
 
 ### How to install:
