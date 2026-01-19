@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Alarm Manager Settings
+Exec=sh -c "~/.local/bin/alarm_manager_settings"
+Icon=preferences-system
+Terminal=false
+Categories=Settings;

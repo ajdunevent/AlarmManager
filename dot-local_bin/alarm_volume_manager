@@ -1,0 +1,161 @@
+#!/bin/bash
+## TODO: Add author stuff, etc
+## TODO: Include credit to Alaraajavamma for alarmvol script:
+##  https://gitlab.com/Alaraajavamma/fastflx1/-/blob/flx1s/scripts/alarmvol?ref_type=heads
+## TODO: Allow for alarm sound selection
+## TODO: Isn't resuming interrupted playback correctly
+
+CONFIG_FILE="$HOME/.config/alarm-volume-manager.conf"
+# Defaults
+DEFAULT_SPEAKER=0
+DEFAULT_MIN=5
+DEFAULT_MAX=85
+DEFAULT_STEP=4
+DEFAULT_INTERVAL=1
+# Internal state 
+ORIGINAL_VOLUME=""
+ORIGINAL_MUTE=""
+ORIGINAL_SINK=""
+ORIGINAL_HARDWARE_STATE=""
+RAMP_PID=""
+PLAYERS_TO_RESUME=""
+
+load_config() {
+  if [ ! -f "$CONFIG_FILE" ]; then
+    cat <<EOF > "${CONFIG_FILE}"
+## Gentle alarm volume ramp-up
+## If no ramp-up is desired, set ALARM_MIN and ALARM_MAX to the same percentage
+## and set the step to zero
+# Initial alarm volume percentage
+ALARM_MIN=$DEFAULT_MIN
+# Final alarm volume percentage
+ALARM_MAX=$DEFAULT_MAX
+# What percentage to increase alarm volume per interval
+STEP=$DEFAULT_STEP
+# Time between alarm volume step increases in seconds
+INTERVAL=$DEFAULT_INTERVAL
+## Force alarm output to speaker?
+# 1 for yes and 0 for no
+FORCE_SPEAKER=$DEFAULT_SPEAKER
+EOF
+  fi
+
+  source "$CONFIG_FILE" 2>/dev/null
+  # Fallbacks
+  : "${FORCE_SPEAKER:=$DEFAULT_SPEAKER}"
+  : "${ALARM_MIN:=$DEFAULT_MIN}"
+  : "${ALARM_MAX:=$DEFAULT_MAX}"
+  : "${STEP:=$DEFAULT_STEP}"
+  : "${INTERVAL:=$DEFAULT_INTERVAL}"
+
+  LAST_LOAD_TIME=$(date +%s)
+}
+
+ramp_volume() {
+    # Snapshot current settings to protect again mid-ramp config changes
+    local V_MIN=$ALARM_MIN
+    local V_MAX=$ALARM_MAX
+    local V_STEP=$STEP
+    local V_INT=$INTERVAL
+
+    pactl set-sink-mute "@DEFAULT_SINK@" 0
+    amixer sset 'Ext_Speaker_Amp' on > /dev/null 2>&1
+    
+    for (( V=V_MIN; V<=V_MAX; V+=V_STEP )); do
+        pactl set-sink-volume "@DEFAULT_SINK@" "${V}%"
+        sleep "$V_INT"
+    done
+    pactl set-sink-volume "@DEFAULT_SINK@" "${V_MAX}%"
+}
+
+# Initial load
+load_config
+
+# Main monitoring loop
+while read -r line; do
+
+  # Check for config changes no more than once per 10 seconds
+  CURRENT_TIME=$(date +%s)
+  if (( CURRENT_TIME - LAST_LOAD_TIME > 10 )); then
+    load_config
+  fi
+
+  # Check if the trigger is for an alarm
+  if [[ "$line" == *"alarm-clock-elapsed"* ]]; then
+    # Save current volume and state
+    
+    ORIGINAL_SINK=$(pactl info | grep "Default Sink" | cut -d' ' -f3)
+    ORIGINAL_VOLUME=$(pactl get-sink-volume "$ORIGINAL_SINK" | grep -Po '\d+(?=%)' | head -n 1)
+    ORIGINAL_MUTE=$(pactl get-sink-mute "$ORIGINAL_SINK" | awk '{print $2}')
+    ORIGINAL_HARDWARE_STATE=$(amixer get Master | awk -F'[][]' '/Front Left:/ { print $(NF-3), $(NF-1) }')
+
+    # Pause the MPRIS players we can, saving state for restoration
+    PLAYERS_TO_RESUME=""
+    for PLAYER in $(dbus-send --session --dest=org.freedesktop.DBus --type=method_call --print-reply /org/freedesktop/DBus org.freedesktop.DBus.ListNames | grep "org.mpris.MediaPlayer2" | cut -d'"' -f2); do
+      STATUS=$(dbus-send --session --print-reply --dest="$PLAYER" /org/mpris/MediaPlayer2 org.freedesktop.DBus.Properties.Get string:'org.mpris.MediaPlayer2.Player' string:'PlaybackStatus' 2>/dev/null | grep "variant" | cut -d'"' -f2)
+      if [ "$STATUS" == "Playing" ]; then
+          PLAYERS_TO_RESUME+="$PLAYER "
+          dbus-send --session --type=method_call --dest="$PLAYER" /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player.Pause 2>/dev/null
+      fi
+    done
+
+    # If configured, force speaker output exclusively
+    if [[ "$FORCE_SPEAKER" -eq 1 ]]; then
+      # First, mute and suspend existing sinks
+      for SINK in $(pactl list sinks short | awk '{print $1}'); do
+        pactl set-sink-mute "$SINK" 1
+      done
+      
+      # Then, set default sink and reroute everything to it just in case
+      pactl set-default-sink "sink.primary_output"
+      sleep 0.1
+      for INPUT in $(pactl list sink-inputs short | awk '{print $1}'); do
+        pactl move-sink-input "$INPUT" "sink.primary_output"
+      done
+      
+      # Finally, set the output to speaker and make sure it is ready
+      pactl suspend-sink "sink.primary_output" 0
+      pactl set-sink-mute "sink.primary_output" 0
+      amixer sset 'Ext_Speaker_Amp' on > /dev/null 2>&1
+    fi
+
+    # Start ramp up in background
+    ramp_volume &
+    RAMP_PID=$!
+  fi
+
+  # Alarm stops (snoozed, dismissed, or timed out)
+  if [[ "$line" == *"member=EndFeedback"* ]] || [[ "$line" == *"member=ActionInvoked"* ]]; then
+    [ -n "$RAMP_PID" ] && kill "$RAMP_PID" 2>/dev/null
+    
+    if [ -n "$ORIGINAL_SINK" ]; then
+      sleep 0.8
+      
+      pactl set-sink-volume "$ORIGINAL_SINK" "${ORIGINAL_VOLUME}%"
+      if [ "$ORIGINAL_MUTE" = "yes" ]; then
+        pactl set-sink-mute "$ORIGINAL_SINK" 1 
+      else
+        pactl set-sink-mute "$ORIGINAL_SINK" 0
+      fi
+     
+      if [[ "$FORCE_SPEAKER" -eq 1 ]]; then
+        pactl set-default-sink "$ORIGINAL_SINK"
+        sleep 0.2
+      fi
+
+      if [ -n "$ORIGINAL_HARDWARE_STATE" ]; then
+        amixer set Master $ORIGINAL_HARDWARE_STATE > /dev/null 2>&1
+      fi
+
+      for PLAYER in $PLAYERS_TO_RESUME; do
+        dbus-send --session --type=method_call --dest="$PLAYER" /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player.Play 2>/dev/null
+      done
+
+      ORIGINAL_VOLUME=""
+      ORIGINAL_MUTE=""
+      ORIGINAL_SINK=""
+      PLAYERS_TO_RESUME=""
+      ORIGINAL_HARDWARE_STATE=""
+    fi
+  fi
+done < <(dbus-monitor "type='method_call',interface='org.sigxcpu.Feedback',member='TriggerFeedback'")

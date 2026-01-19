@@ -1,0 +1,94 @@
+#!/bin/bash
+## TODO: Add author stuff, etc
+
+CONFIG_FILE="$HOME/.config/alarm-early-dismissal.conf"
+DEFAULT_WINDOW=30
+
+LAST_NOTIFIED_UUID=""
+NOTIFICATION_PENDING=""
+
+
+while true; do
+
+  [ ! -f "$CONFIG_FILE" ] && echo "EARLY_DISMISSAL_WINDOW=$DEFAULT_WINDOW" > "$CONFIG_FILE"
+  source "$CONFIG_FILE"
+  : "${EARLY_DISMISSAL_WINDOW:=$DEFAULT_WINDOW}"
+
+  TODAY=$(date +%Y-%m-%d)
+  NOW_H=$(date +%H); NOW_M=$(date +%M)
+  NOW_MINS=$(( 10#$NOW_H * 60 + 10#$NOW_M ))
+
+  # Find the next active alarm for today
+  ALL_ALARMS=$(gsettings get org.gnome.clocks alarms)
+  TARGET_ALARM=$(echo "$ALL_ALARMS" | tr '}' '\n' | grep "ring_time" | grep "$TODAY" | sort -t"'" -k4 | head -1)
+
+  if [ -n "$TARGET_ALARM" ]; then
+    # Extract alarm parameters
+    AL_UUID=$(echo "$TARGET_ALARM" | sed -n "s/.*'id': <'\([^']*\)'>.*/\1/p")
+    AL_NAME=$(echo "$TARGET_ALARM" | sed -n "s/.*'name': <'\([^']*\)'>.*/\1/p")
+    [ -z "$AL_NAME" ] && AL_NAME="Unnamed Alarm"
+    AL_TIME=$(echo "$TARGET_ALARM" | grep -oP "ring_time': <'.*?T\K\d{2}:\d{2}")
+    AL_DAYS=$(echo "$TARGET_ALARM" | grep -oP "'days': <\K(\[.*?\]|@ai \[\])")
+
+    # Check the window
+    AL_H=${AL_TIME%:*}
+    AL_M=${AL_TIME#*:}
+    AL_MINS=$(( 10#$AL_H * 60 + 10#$AL_M ))
+    DIFF=$(( AL_MINS - NOW_MINS ))
+
+    # Notification
+    if [ "$DIFF" -gt 0 ] && [ "$DIFF" -le "$EARLY_DISMISSAL_WINDOW" ]; then
+      if [ "$NOTIFICATION_PENDING" != "$AL_UUID" ] && [ "$LAST_NOTIFIED_UUID" != "$AL_UUID" ]; then
+        
+        NOTIFICATION_PENDING="$AL_UUID"
+        (
+          EXPIRE_TIME="$(( ( $DIFF * 60000 ) - 250 ))"
+          ACTION=$(notify-send --app-name="Alarm Manager" --icon=org.gnome.clocks --urgency=normal --expire-time="$EXPIRE_TIME" --transient "Upcoming Alarm" "Alarm $AL_NAME is scheduled for $AL_TIME." --action="suppress=Dismiss Alarm Early" --action="cancel=Close Notification") 
+
+          if [ "$ACTION" == "suppress" ]; then
+
+            AL_DAYS=$(echo "$TARGET_ALARM" | grep -oP "'days': <\K(\[.*?\]|@ai \[\])")
+            if [[ "$AL_DAYS" == *"[]"* ]]; then
+              echo "One-time alarm. Disabling by removing 'ring_time'..."
+              ALL_ALARMS_NEW=$(echo "$ALL_ALARMS" | sed -E "s/(<'${AL_UUID}'>[^}]*), 'ring_time': <'[^']*'>/\1/")
+            else
+              AL_SET_H=$(printf "%02d" $(echo "$TARGET_ALARM" | grep -oP "'hour': <uint32 \K\d+"))
+              AL_SET_M=$(printf "%02d" $(echo "$TARGET_ALARM" | grep -oP "'minute': <uint32 \K\d+"))
+              AL_TZOFFSET=$(echo "$TARGET_ALARM" | grep -oP "ring_time': <'.*?T\d{2}:\d{2}:\d{2}\K[^']+")
+              AL_DATE=$(echo "$TARGET_ALARM" | grep -oP "'ring_time': <'\K\d{4}-\d{2}-\d{2}")
+              CLEAN_DAYS=$(echo "$AL_DAYS" | tr -d '[]@ai,')
+              NEW_RING=""
+              for I in {1..7}; do
+                TEST_DATE=$(date -d "$AL_DATE +$I days" +%F)
+                d_num=$(date -d "$TEST_DATE" +%u)
+                DATE_MATCH=false
+                for D in $CLEAN_DAYS; do
+                  if [ "$D" -eq "$d_num" ]; then DATE_MATCH=true; break; fi
+                done
+  
+                if [ "$DATE_MATCH" = true ]; then
+                  NEW_RING="${TEST_DATE}T${AL_SET_H}:${AL_SET_M}:00${AL_TZOFFSET}"
+                  break
+                fi
+              done
+
+              ALL_ALARMS_NEW=$(echo "$ALL_ALARMS" | sed "s/\('id': <'$AL_UUID'>[^}]*'ring_time': <'\)[^']*'/\1$NEW_RING'/")
+            fi
+
+            gsettings set org.gnome.clocks alarms "$ALL_ALARMS_NEW"
+            # I haven't found an elegant way to force GNOME Clocks to reread its settings...
+            pkill -f gnome-clocks && gnome-clocks --hidden &
+          fi
+        ) &
+      fi
+    fi
+  fi
+  # Reset
+  if [ -n "$AL_MINS" ]; then
+    # If we are within the same minute or past it
+    if [ "$NOW_MINS" -ge "$AL_MINS" ]; then
+      NOTIFICATION_PENDING=""
+    fi
+  fi
+  sleep 30
+done

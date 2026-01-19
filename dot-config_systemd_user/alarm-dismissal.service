@@ -1,0 +1,12 @@
+[Unit]
+Description=Upcoming Alarm Notification and Early Dismissal
+After=dbus.service
+
+[Service]
+Type=simple
+ExecStart=/home/furios/.local/bin/alarm_early_dismissal
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
