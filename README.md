@@ -15,6 +15,8 @@
 
 ### To Do:
 * More testing - you should consider this a warning!
+* Does this even work on devices besides the FLX1s?  Who knows!?
+* List dependencies (I don't remember installing anything outside of the FuriOS defaults for this)
 * Change the way the interval variable is used to be more intuitive and friendly
 * Make resuming of media players reliable
 * Allow selection of alarm tone (maybe... I've got an idea but no clue if it would work)
