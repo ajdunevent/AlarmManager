@@ -9,7 +9,7 @@
 * Dismiss alarms early
 * Play alarm even if phone is in silent, volume is down/off, or otherwise muted
 * Pause media players at alarm time and resume afterwards (resume is a bit unreliable atm)
-* Optionally switch to speaker output for alarm and restore state afterwards
+* Optionally switch to speaker output for alarm and (attempt to) restore state afterwards
 * Optionally ramp volume up from set minimum to set maximum for gentle wake up
 
 
